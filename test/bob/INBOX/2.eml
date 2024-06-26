@@ -1,0 +1,13 @@
+Date: Tue, 26 Jan 2020 23:11:08 +0000
+Message-ID: <1642365537868884500>
+Subject: Test
+From: bob@localhost
+To: bob@localhost
+Content-Type: text/html
+Content-Length: 109
+
+<html>
+  <body>
+    <a>Here's a placeholder message just to show there's something here</a>
+  </body>
+</html>
