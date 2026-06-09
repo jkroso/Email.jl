@@ -4,6 +4,42 @@
 @use "github.com/jkroso/Buffer.jl" Buffer
 @use Dates: format, now, Date, DateTime, @dateformat_str
 @use Base64: base64encode, Base64DecodePipe
+
+struct IMAPError <: Exception
+  msg::String
+end
+Base.showerror(io::IO, e::IMAPError) = print(io, "IMAPError: ", e.msg)
+
+_search_cmd(; since::Union{Nothing,Date}=nothing, uid_after::Union{Nothing,Integer}=nothing) = begin
+  since !== nothing     && return "UID SEARCH SINCE " * format(since, dateformat"dd-u-yyyy")
+  uid_after !== nothing && return "UID SEARCH UID $(Int(uid_after)+1):*"
+  "UID SEARCH ALL"
+end
+
+_parse_search(out::AbstractString)::Vector{Int} = begin
+  for line in split(out, r"\r?\n")
+    m = match(r"^\*\s+SEARCH(.*)$"i, line)
+    m === nothing && continue
+    return [parse(Int, t) for t in split(strip(m.captures[1])) if !isempty(t)]
+  end
+  Int[]
+end
+
+_fetch_cmd(uid::Integer; peek::Bool=true, section::AbstractString="") =
+  "UID FETCH $(Int(uid)) (BODY$(peek ? ".PEEK" : "")[$section])"
+
+# A FETCH response wraps its payload in an IMAP literal "... {N}\r\n<N bytes>".
+# Return those N bytes; fall back to the whole buffer when no literal is present.
+_parse_literal(out::AbstractVector{UInt8})::Vector{UInt8} = begin
+  s = String(copy(out))
+  m = match(r"\{(\d+)\}\r?\n", s)
+  m === nothing && return Vector{UInt8}(out)
+  n = parse(Int, m.captures[1])
+  start = m.offset + length(m.match)   # first payload byte follows the match
+  bytes = Vector{UInt8}(out)
+  stop = min(start + n - 1, length(bytes))
+  bytes[start:stop]
+end
 @use TimeZones: ZonedDateTime, localzone
 @use ProgressMeter: @showprogress
 @use Sockets: connect, TCPSocket
