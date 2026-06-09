@@ -44,9 +44,6 @@ end
 @use ProgressMeter: @showprogress
 @use Sockets: connect, TCPSocket
 @use OpenSSL
-@use DotEnv
-
-const env = DotEnv.config()
 
 const CRLF = "\r\n"
 
@@ -423,26 +420,39 @@ end
 Base.length(f::Folder) = select(f)
 Base.eltype(f::Folder) = Mail
 
-download(uri, dir=fs"~/Desktop/$(uri.username)") = begin
+download(uri, dir=fs"~/Desktop/$(uri.username)"; verbose::Bool=false) = begin
   server = connect(uri)::IMAPServer
   login(server)
-  download(server, dir)
+  download(server, dir; verbose=verbose)
 end
 
-download(server::IMAPServer, dir) = begin
+download(server::IMAPServer, dir; verbose::Bool=false) = begin
   mkpath(string(dir))
-  @showprogress desc="Downloading all folders" for folder in folders(server)
-    "Noselect" in folder.attributes && continue
-    download(folder, dir * folder.name)
+  if verbose
+    @showprogress desc="Downloading all folders" for folder in folders(server)
+      "Noselect" in folder.attributes && continue
+      download(folder, dir * folder.name; verbose=verbose)
+    end
+  else
+    for folder in folders(server)
+      "Noselect" in folder.attributes && continue
+      download(folder, dir * folder.name; verbose=verbose)
+    end
   end
 end
 
-download(folder::Folder, dir) = begin
+download(folder::Folder, dir; verbose::Bool=false) = begin
   mkpath(string(dir))
   n = select(folder)
   io = fetch(folder)
-  @showprogress desc=folder.name for i in 1:n
-    write(dir * "$i.eml", read_message(io))
+  if verbose
+    @showprogress desc=folder.name for i in 1:n
+      write(dir * "$i.eml", read_message(io))
+    end
+  else
+    for i in 1:n
+      write(dir * "$i.eml", read_message(io))
+    end
   end
 end
 
