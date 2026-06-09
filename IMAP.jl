@@ -58,20 +58,21 @@ end
 mutable struct IMAPServer
   uri::URI
   sock::Union{OpenSSL.SSLStream, TCPSocket}
+  selected::Union{Nothing,String}   # currently-SELECTed folder, nothing if none
 end
 
-connect(uri::URI{:imap}) = hello(IMAPServer(uri, connect(uri.host, uri.port)))
+connect(uri::URI{:imap}) = hello(IMAPServer(uri, connect(uri.host, uri.port), nothing))
 
 connect(uri::URI{:imaps}) = begin
   sock = OpenSSL.SSLStream(connect(uri.host, uri.port))
   OpenSSL.hostname!(sock, uri.host)
   OpenSSL.connect(sock)
-  hello(IMAPServer(uri, sock))
+  hello(IMAPServer(uri, sock, nothing))
 end
 
 hello(s::IMAPServer) = begin
   status = String(readchunk(s.sock))
-  @assert startswith(status, "* OK")
+  startswith(status, "* OK") || throw(IMAPError("server did not greet with OK: $status"))
   haslogin(s.uri) && login(s)
   s
 end
@@ -103,7 +104,7 @@ command(sock::IO, cmd, out::IO, expectation="OK") = begin
     if hasstatusline(buffer, tag)
       range = status_split(buffer)
       status = String(@view(buffer[range.stop + length(tag) + 2:end]))
-      @assert startswith(status, expectation) status
+      startswith(status, expectation) || throw(IMAPError(strip(status)))
       write(out, resize!(buffer, range.start))
       break
     else
@@ -143,9 +144,52 @@ end
 select((;name,server,attributes)::Folder) = begin
   @assert !("Noselect" in attributes)
   str = command(server.sock, "SELECT \"$name\"")
+  server.selected = name
   m = match(r"\* (\d+) EXISTS", str)
   isnothing(m) && return NaN
   parse(Int, m[1])
+end
+
+ensure_selected(f::Folder) = begin
+  f.server.selected == f.name && return
+  @assert !("Noselect" in f.attributes)
+  command(f.server.sock, "SELECT \"$(f.name)\"")
+  f.server.selected = f.name
+  nothing
+end
+
+"UIDs matching the search. Pass `since::Date` or `uid_after::Integer` (defaults to ALL)."
+search(f::Folder; kw...) = begin
+  ensure_selected(f)
+  _parse_search(command(f.server.sock, _search_cmd(; kw...)))
+end
+
+"Lowercased-key header dict for one message (BODY.PEEK[HEADER] by default)."
+fetchheaders(f::Folder, uid::Integer; peek::Bool=true) = begin
+  ensure_selected(f)
+  out = Buffer()
+  command(f.server.sock, _fetch_cmd(uid; peek, section="HEADER"), out)
+  close(out)
+  hdrs = parse_headers(IOBuffer(_parse_literal(read(out))))
+  Dict{String,String}(lowercase(k) => v for (k, v) in hdrs)
+end
+
+"Full parsed Mail for one message (BODY.PEEK[] by default)."
+fetch(f::Folder, uid::Integer; peek::Bool=true) = begin
+  ensure_selected(f)
+  out = Buffer()
+  command(f.server.sock, _fetch_cmd(uid; peek, section=""), out)
+  close(out)
+  parse_message(IOBuffer(_parse_literal(read(out))))
+end
+
+"Round-trip a NOOP; throws IMAPError on failure. Cheap liveness/credential check."
+noop(s::IMAPServer) = (command(s.sock, "NOOP"); nothing)
+
+Base.close(s::IMAPServer) = begin
+  try; command(s.sock, "LOGOUT"); catch; end
+  try; close(s.sock); catch; end
+  nothing
 end
 
 fetch((;name,server,attributes)::Folder) = begin
