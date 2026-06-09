@@ -1,0 +1,26 @@
+From: "Bolt & Nut" <accounts@boltnut.example>
+Subject: =?UTF-8?B?WW91ciBSZWNlaXB0?=
+Message-ID: <r-99@boltnut.example>
+Date: Fri, 05 Jun 2026 11:00:00 +1000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="OUT"
+
+--OUT
+Content-Type: multipart/alternative; boundary="IN"
+
+--IN
+Content-Type: text/plain
+
+Receipt attached.
+--IN
+Content-Type: text/html
+
+<p>Receipt attached.</p>
+--IN--
+--OUT
+Content-Type: image/png; name="x"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="=?UTF-8?B?aW52b2ljZS5wbmc=?="
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==
+--OUT--

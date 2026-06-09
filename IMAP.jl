@@ -3,7 +3,7 @@
 @use "github.com/jkroso/Prospects.jl" @mutable @struct assoc @field_str
 @use "github.com/jkroso/Buffer.jl" Buffer
 @use Dates: format, now, Date, DateTime, @dateformat_str
-@use Base64: base64encode, Base64DecodePipe
+@use Base64: base64encode, Base64DecodePipe, base64decode
 
 struct IMAPError <: Exception
   msg::String
@@ -40,7 +40,7 @@ _parse_literal(out::AbstractVector{UInt8})::Vector{UInt8} = begin
   stop = min(start + n - 1, length(bytes))
   bytes[start:stop]
 end
-@use TimeZones: ZonedDateTime, localzone
+@use TimeZones: ZonedDateTime, localzone, now
 @use ProgressMeter: @showprogress
 @use Sockets: connect, TCPSocket
 @use OpenSSL
@@ -53,6 +53,14 @@ const CRLF = "\r\n"
 parse_date(str) = begin
   date = match(r"(?:\w+, )?(\d+ \w+ \d+ \d+:\d+:\d+ [+-]\d+)", str)[1]
   parse(ZonedDateTime, date, dateformat"dd u yyyy HH:MM:SS zzzz")
+end
+
+_h(hdrs, k) = something(get(hdrs, k, nothing), get(hdrs, lowercase(k), nothing), "")
+
+_date_or_now(hdrs) = begin
+  d = get(hdrs, "Date", nothing)
+  d === nothing && return now(localzone())
+  try; parse_date(d); catch; now(localzone()); end
 end
 
 mutable struct IMAPServer
@@ -232,27 +240,27 @@ parse_message(io) = toEmail(parse_part(io)...)
 
 toEmail(header, ::Union{MIME"multipart/alternative",MIME"multipart/mixed"}, parts) = begin
   (body, attachments...) = parts
-  Mail(from=header["From"],
-       to=header["To"],
-       date=parse_date(header["Date"]),
-       subject=header["Subject"],
+  Mail(from=_h(header, "From"),
+       to=_h(header, "To"),
+       date=_date_or_now(header),
+       subject=_h(header, "Subject"),
        body=toPart(body.headers, body.mime, body.body),
-       replyto=get(header, "Reply-To", nothing),
-       id=get(header, "Message-Id", nothing),
+       replyto=let r=_h(header,"Reply-To"); isempty(r) ? nothing : r end,
+       id=let i=_h(header,"Message-Id"); isempty(i) ? nothing : i end,
        attachments=map(p->toAttachment(p[1], p[2], p[3]), attachments))
 end
 
 toEmail(headers, mime, body) = begin
-  Mail(from=headers["From"],
-       to=headers["To"],
-       date=parse_date(headers["Date"]),
-       subject=headers["Subject"],
+  Mail(from=_h(headers, "From"),
+       to=_h(headers, "To"),
+       date=_date_or_now(headers),
+       subject=_h(headers, "Subject"),
        body=toPart(headers, mime, body),
-       replyto=get(headers, "Reply-To", nothing),
-       id=get(headers, "Message-Id", nothing))
+       replyto=let r=_h(headers,"Reply-To"); isempty(r) ? nothing : r end,
+       id=let i=_h(headers,"Message-Id"); isempty(i) ? nothing : i end)
 end
 
-toPart(headers, mime::MIME, data) = BinaryPart(mime, data)
+toPart(headers, mime::MIME, data) = BinaryPart(mime, data isa IO ? read(data) : Vector{UInt8}(data))
 toPart(headers, mime::MIME"multipart/alternative", parts) = Alternatives(map(p->toPart(p[1],p[2],p[3]), parts))
 toPart(headers, mime::MIME"text/plain", body) = PlainText(body)
 toPart(headers, mime::MIME"text/html", body) = HTMLPart(body)
@@ -260,9 +268,25 @@ toPart(headers, mime::MIME"text/html", body) = HTMLPart(body)
 toAttachment(headers, mime::MIME, body) = Attachment(filename(headers), toPart(headers, mime, body))
 
 filename(headers) = begin
-  cd = get(headers, "Content-Disposition", nothing)
-  isnothing(cd) && return ""
-  match(r"filename=\"?([^\"]+)\"?", cd)[1]
+  cd = get(headers, "Content-Disposition", "")
+  ct = get(headers, "Content-Type", "")
+  m = match(r"filename\*?=\"?([^\";]+)\"?", cd)
+  m === nothing && (m = match(r"\bname=\"?([^\";]+)\"?", ct))
+  m === nothing ? "" : _decode_2047(strip(m.captures[1]))
+end
+
+# Minimal RFC 2047 "=?charset?B/Q?…?=" decode for filenames.
+_decode_2047(s::AbstractString) = begin
+  occursin("=?", s) || return s
+  replace(s, r"=\?[^?]+\?([BbQq])\?([^?]*)\?=" => function(whole)
+    mm = match(r"=\?[^?]+\?([BbQq])\?([^?]*)\?=", whole)
+    enc = uppercase(mm.captures[1]); payload = mm.captures[2]
+    if enc == "B"
+      try; return String(base64decode(payload)); catch; return payload; end
+    else
+      return replace(payload, "_" => " ", r"=([0-9A-Fa-f]{2})" => m2 -> String(hex2bytes(m2[2:3])))
+    end
+  end)
 end
 
 parse_part(io) = begin

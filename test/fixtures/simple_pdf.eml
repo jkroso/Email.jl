@@ -1,0 +1,18 @@
+From: Acme Supplies <billing@acme.example>
+Subject: Tax Invoice 4471
+Message-ID: <inv-4471@acme.example>
+Date: Fri, 05 Jun 2026 09:14:00 +1000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="BOUND1"
+
+--BOUND1
+Content-Type: text/plain
+
+Invoice attached.
+--BOUND1
+Content-Type: application/pdf; name="invoice-4471.pdf"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="invoice-4471.pdf"
+
+JVBERi0xLjQKJeLjz9MK
+--BOUND1--

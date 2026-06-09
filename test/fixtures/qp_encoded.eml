@@ -1,0 +1,19 @@
+From: Newsletter <news@spam.example>
+Subject: Weekly deals
+Message-ID: <nl-1@spam.example>
+Date: Fri, 05 Jun 2026 08:00:00 +1000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="QP"
+
+--QP
+Content-Type: text/plain
+Content-Transfer-Encoding: quoted-printable
+
+Hello=20world
+--QP
+Content-Type: application/pdf; name="catalogue.pdf"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="catalogue.pdf"
+
+JVBERi0xLjUK
+--QP--
