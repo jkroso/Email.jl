@@ -1,4 +1,4 @@
-@use "../IMAP.jl" IMAPError _search_cmd _parse_search _fetch_cmd _parse_literal
+@use "../IMAP.jl" IMAPError _search_cmd _parse_search _fetch_cmd _parse_literal _imap_quote
 @use Dates: Date
 @use Test...
 
@@ -26,4 +26,10 @@ end
 
 @testset "IMAPError" begin
   @test IMAPError("boom") isa Exception
+end
+
+@testset "LOGIN credential quoting" begin
+  @test _imap_quote("app pw") == "\"app pw\""              # space survives
+  @test _imap_quote("plain") == "\"plain\""
+  @test _imap_quote("a\"b\\c") == "\"a\\\"b\\\\c\""        # escape " and \
 end

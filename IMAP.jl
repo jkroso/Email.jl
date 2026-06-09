@@ -84,7 +84,11 @@ end
 
 haslogin(uri::URI) = !isempty(uri.username) && !isempty(uri.password)
 
-login((;sock,uri)::IMAPServer) = command(sock, "LOGIN $(uri.username) $(uri.password)")
+# IMAP quoted-string (RFC 3501): wrap in quotes, backslash-escape " and \.  This
+# is essential for credentials containing spaces (e.g. Gmail app passwords) or
+# special characters — an unquoted LOGIN would split "app pw" into two args.
+_imap_quote(s) = '"' * replace(string(s), "\\" => "\\\\", "\"" => "\\\"") * '"'
+login((;sock,uri)::IMAPServer) = command(sock, "LOGIN $(_imap_quote(uri.username)) $(_imap_quote(uri.password))")
 logout((;sock)::IMAPServer) = command(sock, "LOGOUT")
 
 readchunk(sock) = begin
