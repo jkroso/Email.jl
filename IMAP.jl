@@ -16,8 +16,14 @@ struct IMAPError <: Exception
 end
 Base.showerror(io::IO, e::IMAPError) = print(io, "IMAPError: ", e.msg)
 
-_search_cmd(; since::Union{Nothing,Date}=nothing, uid_after::Union{Nothing,Integer}=nothing) = begin
-  since !== nothing     && return "UID SEARCH SINCE " * format(since, dateformat"dd-u-yyyy")
+_search_cmd(; since::Union{Nothing,Date}=nothing, before::Union{Nothing,Date}=nothing,
+              uid_after::Union{Nothing,Integer}=nothing) = begin
+  if since !== nothing || before !== nothing
+    parts = String[]
+    since !== nothing  && push!(parts, "SINCE "  * format(since,  dateformat"dd-u-yyyy"))
+    before !== nothing && push!(parts, "BEFORE " * format(before, dateformat"dd-u-yyyy"))
+    return "UID SEARCH " * join(parts, " ")
+  end
   uid_after !== nothing && return "UID SEARCH UID $(Int(uid_after)+1):*"
   "UID SEARCH ALL"
 end
@@ -33,6 +39,45 @@ end
 
 _fetch_cmd(uid::Integer; peek::Bool=true, section::AbstractString="") =
   "UID FETCH $(Int(uid)) (BODY$(peek ? ".PEEK" : "")[$section])"
+
+# Compress sorted UIDs into the RFC 3501 sequence-set syntax ("1:3,7,9:10") so a
+# batched FETCH of thousands of mostly-consecutive UIDs stays within command-line
+# length limits.  Input need not be sorted or unique.
+_uid_set(uids) = begin
+  ids = sort!(unique(Int.(uids)))
+  isempty(ids) && return ""
+  parts = String[]
+  lo = hi = ids[1]
+  for uid in @view ids[2:end]
+    if uid == hi + 1
+      hi = uid
+    else
+      push!(parts, lo == hi ? string(lo) : "$lo:$hi")
+      lo = hi = uid
+    end
+  end
+  push!(parts, lo == hi ? string(lo) : "$lo:$hi")
+  join(parts, ",")
+end
+
+# Parse a multi-message UID FETCH response into uid => literal-bytes pairs.  Each
+# message arrives as an untagged line "* n FETCH (UID x BODY[…] {N}" followed by
+# N payload bytes.  Assumes the UID attribute precedes the literal opener on its
+# line (true of Gmail and every mainstream server — UID FETCH always echoes UID).
+# Lines that aren't literal openers (closing parens etc.) are skipped.
+_parse_fetch_literals(out::AbstractVector{UInt8})::Vector{Pair{Int,Vector{UInt8}}} = begin
+  io = IOBuffer(Vector{UInt8}(out))
+  results = Pair{Int,Vector{UInt8}}[]
+  while !eof(io)
+    line = readline(io)
+    m = match(r"\bUID (\d+)\b.*\{(\d+)\}$", line)
+    m === nothing && continue
+    uid = parse(Int, m.captures[1])
+    n = parse(Int, m.captures[2])
+    push!(results, uid => read(io, n))
+  end
+  results
+end
 
 # A FETCH response wraps its payload in an IMAP literal "... {N}\r\n<N bytes>".
 # Return those N bytes; fall back to the whole buffer when no literal is present.
@@ -183,7 +228,11 @@ ensure_selected(f::Folder) = begin
   nothing
 end
 
-"UIDs matching the search. Pass `since::Date` or `uid_after::Integer` (defaults to ALL)."
+"""
+UIDs matching the search. Pass `since::Date` and/or `before::Date` (internal-date
+bounds; SINCE is inclusive, BEFORE exclusive), or `uid_after::Integer` (defaults
+to ALL).
+"""
 search(f::Folder; kw...) = begin
   ensure_selected(f)
   _parse_search(command(f.server.sock, _search_cmd(; kw...)))
@@ -197,6 +246,32 @@ fetchheaders(f::Folder, uid::Integer; peek::Bool=true) = begin
   close(out)
   hdrs = parse_headers(IOBuffer(_parse_literal(read(out))))
   Dict{String,String}(lowercase(k) => v for (k, v) in hdrs)
+end
+
+"""
+Header dicts for many messages in a handful of round trips — one `UID FETCH`
+per `chunk` UIDs instead of one per message, which is the difference between
+seconds and tens of minutes on a multi-thousand-message range.
+
+Returns `Dict{Int,Dict{String,String}}` keyed by UID (header keys lowercased).
+UIDs the server doesn't answer for (expunged mid-fetch) are simply absent, as
+is any message whose headers fail to parse — bulk callers want the rest of the
+batch, not an exception.
+"""
+fetchheaders(f::Folder, uids::AbstractVector{<:Integer}; peek::Bool=true, chunk::Integer=500) = begin
+  ensure_selected(f)
+  result = Dict{Int,Dict{String,String}}()
+  isempty(uids) && return result
+  for batch in Iterators.partition(sort!(unique(Int.(uids))), chunk)
+    out = Buffer()
+    command(f.server.sock, "UID FETCH $(_uid_set(batch)) (BODY$(peek ? ".PEEK" : "")[HEADER])", out)
+    close(out)
+    for (uid, payload) in _parse_fetch_literals(read(out))
+      hdrs = try parse_headers(IOBuffer(payload)) catch; continue end
+      result[uid] = Dict{String,String}(lowercase(k) => v for (k, v) in hdrs)
+    end
+  end
+  result
 end
 
 "Full parsed Mail for one message (BODY.PEEK[] by default)."
