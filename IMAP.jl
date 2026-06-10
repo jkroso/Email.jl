@@ -1,9 +1,15 @@
 @use "github.com/jkroso/URI.jl" @uri_str URI decode ["FS.jl" @fs_str FSPath]
-@use "./types.jl" Attachment PlainText HTMLPart BinaryPart Alternatives Mail
+@use "./types.jl" Attachment PlainText HTMLPart BinaryPart Alternatives Mail Contact text html
 @use "github.com/jkroso/Prospects.jl" @mutable @struct assoc @field_str
 @use "github.com/jkroso/Buffer.jl" Buffer
 @use Dates: format, now, Date, DateTime, @dateformat_str
 @use Base64: base64encode, Base64DecodePipe, base64decode
+@use TimeZones: ZonedDateTime, localzone
+@use ProgressMeter: @showprogress
+@use Sockets: connect, TCPSocket
+@use OpenSSL
+
+const CRLF = "\r\n"
 
 struct IMAPError <: Exception
   msg::String
@@ -40,12 +46,6 @@ _parse_literal(out::AbstractVector{UInt8})::Vector{UInt8} = begin
   stop = min(start + n - 1, length(bytes))
   bytes[start:stop]
 end
-@use TimeZones: ZonedDateTime, localzone, now
-@use ProgressMeter: @showprogress
-@use Sockets: connect, TCPSocket
-@use OpenSSL
-
-const CRLF = "\r\n"
 
 parse_date(str) = begin
   date = match(r"(?:\w+, )?(\d+ \w+ \d+ \d+:\d+:\d+ [+-]\d+)", str)[1]
@@ -73,6 +73,12 @@ connect(uri::URI{:imaps}) = begin
   OpenSSL.hostname!(sock, uri.host)
   OpenSSL.connect(sock)
   hello(IMAPServer(uri, sock, nothing))
+end
+
+"Connect, run `f(server)`, and always close the connection afterwards"
+connect(f::Function, uri::Union{URI{:imap},URI{:imaps}}) = begin
+  server = connect(uri)
+  try f(server) finally close(server) end
 end
 
 hello(s::IMAPServer) = begin
@@ -140,6 +146,8 @@ struct Folder
   server::IMAPServer
 end
 
+Base.show(io::IO, f::Folder) = print(io, "Folder(\"", f.name, "\")")
+
 folders(server::IMAPServer) = begin
   folders = command(server.sock, "LIST \"\" *")
   map(eachline(IOBuffer(folders))) do line
@@ -148,6 +156,14 @@ folders(server::IMAPServer) = begin
     attributes = map(s->s[2:end], split(m[:attributes]))
     Folder(m[:name], attributes, server)
   end
+end
+
+Base.getindex(s::IMAPServer, folder::AbstractString) = begin
+  available = folders(s)
+  for f in available
+    f.name == folder && return f
+  end
+  error("No such folder: $folder. Available folders: $(join(map(field"name", available), ", "))")
 end
 
 select((;name,server,attributes)::Folder) = begin
@@ -191,6 +207,21 @@ fetch(f::Folder, uid::Integer; peek::Bool=true) = begin
   close(out)
   parse_message(IOBuffer(_parse_literal(read(out))))
 end
+
+"`folder[uid]` fetches one message. `folder[end]` fetches the most recent one."
+Base.getindex(f::Folder, uid::Integer) = fetch(f, uid)
+Base.lastindex(f::Folder) = last(search(f))
+Base.firstindex(f::Folder) = first(search(f))
+
+"""
+Lazily fetch the messages matching a search. Takes the same keyword
+arguments as `search` (`since::Date`, `uid_after::Integer`, default ALL):
+
+    for mail in messages(inbox, since=Date(2026, 6, 1))
+      println(mail.subject)
+    end
+"""
+messages(f::Folder; kw...) = (fetch(f, uid) for uid in search(f; kw...))
 
 "Round-trip a NOOP; throws IMAPError on failure. Cheap liveness/credential check."
 noop(s::IMAPServer) = (command(s.sock, "NOOP"); nothing)
@@ -239,7 +270,7 @@ end
 
 parse_message(io) = toEmail(parse_part(io)...)
 
-toEmail(header, ::Union{MIME"multipart/alternative",MIME"multipart/mixed"}, parts) = begin
+toEmail(header, ::MIME"multipart/mixed", parts) = begin
   (body, attachments...) = parts
   Mail(from=_h(header, "From"),
        to=_h(header, "To"),
@@ -263,8 +294,11 @@ end
 
 toPart(headers, mime::MIME, data) = BinaryPart(mime, data isa IO ? read(data) : Vector{UInt8}(data))
 toPart(headers, mime::MIME"multipart/alternative", parts) = Alternatives(map(p->toPart(p[1],p[2],p[3]), parts))
-toPart(headers, mime::MIME"text/plain", body) = PlainText(body)
-toPart(headers, mime::MIME"text/html", body) = HTMLPart(body)
+toPart(headers, mime::MIME"text/plain", body) = PlainText(asstring(body))
+toPart(headers, mime::MIME"text/html", body) = HTMLPart(asstring(body))
+
+asstring(io::IO) = read(io, String)
+asstring(s) = String(s)
 
 toAttachment(headers, mime::MIME, body) = Attachment(filename(headers), toPart(headers, mime, body))
 
@@ -355,64 +389,6 @@ end
 
 parse_mime(str) = MIME(lowercase(match(r"^([^; ]+)", str)[1]))
 
-Base.write(io::IO, part::PlainText) = write(sock, part.object)
-Base.write(io::IO, msg::Mail) = begin
-  write(io, """
-            Date: $(format(msg.date, zdt))\r
-            From: $(msg.from.name) <$(msg.from.email)>\r
-            Subject: $(msg.subject)\r
-            To: $(msg.to.email)\r
-            MIME-Version: 1.0\r\n""")
-  if !isempty(msg.cc)
-    write(sock, "Cc: $(join(map(field"email", msg.cc), ", "))\r\n")
-  end
-  if !isnothing(msg.replyto)
-    write(sock, "Reply-To: $(msg.replyto.email)\r\n")
-  end
-  if isempty(msg.attachments)
-    write_attachment(sock, msg.body)
-  else
-    write(sock, "Content-Type: multipart/mixed; boundary=\"$boundary\"\r\n\r\n")
-    attachments = isempty(msg.body) ? msg.attachments : [msg.body, msg.attachments...]
-    for a in attachments
-      write(sock, "--$boundary$CRLF")
-      write_attachment(sock, a)
-    end
-    write(sock, "--$boundary--$CRLF")
-  end
-end
-
-write_attachment(io::IO, a::PlainText) = begin
-  write(io::IO, "Content-Type: text/plain; charset=UTF-8\r\n")
-  write(io::IO, "Content-Disposition: inline\r\n\r\n")
-  write(io::IO, a.object)
-  write(io::IO, "\r\n")
-end
-
-write_attachment(io::IO, a::BinaryPart) = begin
-  write(io, "Content-Type: $(contenttype_from_mime(a.mime))\r\n")
-  write(io, "Content-Transfer-Encoding: base64\r\n\r\n")
-  writefolded(io, base64encode(a.object))
-  write(io, "\r\n")
-end
-
-write_attachment(io::IO, a::Attachment) = begin
-  write(io, "Content-Disposition: attachment; filename=\"$(a.name)\"\r\n")
-  write_attachment(io, a.part)
-end
-
-"email's have a soft line limit of 78"
-writefolded(io::IO, data, sizelimit=78) = begin
-  range = 1:sizelimit:length(data)
-  start = 1
-  for i in 2:length(range)
-    stop = range[i]
-    write(io, @view(data[start:stop]), CRLF)
-    start = stop+1
-  end
-  write(io, @view(data[start:length(data)]), CRLF)
-end
-
 Base.iterate(f::Folder) = begin
   n = select(f)
   iterate(f, fetch(f))
@@ -424,23 +400,26 @@ end
 Base.length(f::Folder) = select(f)
 Base.eltype(f::Folder) = Mail
 
-download(uri, dir=fs"~/Desktop/$(uri.username)"; verbose::Bool=false) = begin
-  server = connect(uri)::IMAPServer
-  login(server)
-  download(server, dir; verbose=verbose)
-end
+"""
+Save every message as a .eml file under `dir` (defaults to
+`~/Desktop/<username>`), one subdirectory per folder:
 
-download(server::IMAPServer, dir; verbose::Bool=false) = begin
+    download(uri"imaps://user:pass@imap.gmail.com:993")
+"""
+download(uri::URI, dir=fs"~/Desktop/$(uri.username)"; verbose::Bool=false) =
+  connect(server->download(server, dir; verbose), uri)
+
+download(server::IMAPServer, dir=fs"~/Desktop/$(server.uri.username)"; verbose::Bool=false) = begin
   mkpath(string(dir))
   if verbose
     @showprogress desc="Downloading all folders" for folder in folders(server)
       "Noselect" in folder.attributes && continue
-      download(folder, dir * folder.name; verbose=verbose)
+      download(folder, dir * folder.name; verbose)
     end
   else
     for folder in folders(server)
       "Noselect" in folder.attributes && continue
-      download(folder, dir * folder.name; verbose=verbose)
+      download(folder, dir * folder.name; verbose)
     end
   end
 end
@@ -458,11 +437,4 @@ download(folder::Folder, dir; verbose::Bool=false) = begin
       write(dir * "$i.eml", read_message(io))
     end
   end
-end
-
-Base.getindex(s::IMAPServer, folder::AbstractString) = begin
-  for f in folders(s)
-    f.name == folder && return f
-  end
-  error("No such folder: $folder")
 end

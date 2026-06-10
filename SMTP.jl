@@ -1,17 +1,8 @@
-@use "github.com/jkroso/Prospects.jl" @field_str
 @use "github.com/jkroso/URI.jl" URI decode
-@use "./types.jl" Mail Attachment PlainText BinaryPart Part
-@use Dates: format, @dateformat_str
-@use MIMEs: contenttype_from_mime
+@use "./types.jl" Mail Attachment PlainText HTMLPart BinaryPart Alternatives Part Contact text html CRLF
 @use Sockets: connect, TCPSocket
 @use Base64: base64encode
 @use OpenSSL
-@use DotEnv
-
-const zdt = dateformat"e, dd u yyyy HH:MM:SS zzzz"
-const boundary = string(rand(UInt128), base=62)
-const env = DotEnv.config()
-const CRLF = "\r\n"
 
 mutable struct SMTPServer
   uri::URI
@@ -28,6 +19,12 @@ connect(uri::URI{:smtps}) = begin
   hello(SMTPServer(uri, sock))
 end
 
+"Connect, run `f(server)`, and always close the connection afterwards"
+connect(f::Function, uri::Union{URI{:smtp},URI{:smtps}}) = begin
+  server = connect(uri)
+  try f(server) finally close(server) end
+end
+
 hello(s::SMTPServer) = begin
   @assert startswith(readresponse(s.sock), "220")
   write(s.sock, "EHLO $(s.uri.host)\r\n")
@@ -40,13 +37,11 @@ readresponse(ctx) = eof(ctx) ? "" : String(readavailable(ctx))
 
 haslogin(uri::URI) = !isempty(uri.username) && !isempty(uri.password)
 
-login((;sock)::SMTPServer, id=env["EMAIL_ID"], password=env["EMAIL_PASS"]) = begin
+login((;sock)::SMTPServer, id, password) = begin
   write(sock, "AUTH PLAIN $(base64encode("\0$id\0$password"))\r\n")
   @assert startswith(readresponse(sock), "235")
 end
 
-Base.isempty(part::PlainText) = isempty(part.object)
-Base.write((;sock)::SMTPServer, part::PlainText) = write(sock, part.object)
 Base.write((;sock)::SMTPServer, msg::Mail) = begin
   write(sock, "MAIL FROM:<$(msg.from.email)>\r\n")
   @assert startswith(readresponse(sock), "250")
@@ -56,62 +51,9 @@ Base.write((;sock)::SMTPServer, msg::Mail) = begin
   end
   write(sock, "DATA\r\n")
   @assert startswith(readresponse(sock), "354")
-  write(sock, """
-              Date: $(format(msg.date, zdt))\r
-              From: $(msg.from.name) <$(msg.from.email)>\r
-              Subject: $(msg.subject)\r
-              To: $(msg.to.email)\r
-              MIME-Version: 1.0\r\n""")
-  if !isempty(msg.cc)
-    write(sock, "Cc: $(join(map(field"email", msg.cc), ", "))\r\n")
-  end
-  if !isnothing(msg.replyto)
-    write(sock, "Reply-To: $(msg.replyto.email)\r\n")
-  end
-  if isempty(msg.attachments)
-    write_attachment(sock, msg.body)
-    write(sock, '.', CRLF)
-  else
-    write(sock, "Content-Type: multipart/mixed; boundary=\"$boundary\"\r\n\r\n")
-    attachments = isempty(msg.body) ? msg.attachments : [msg.body, msg.attachments...]
-    for a in attachments
-      write(sock, "--$boundary$CRLF")
-      write_attachment(sock, a)
-    end
-    write(sock, "--$boundary--$CRLF.$CRLF")
-  end
+  write(sock, msg)
+  write(sock, '.', CRLF)
   @assert startswith(readresponse(sock), "250")
-end
-
-write_attachment(sock, a::PlainText) = begin
-  write(sock, "Content-Type: text/plain; charset=UTF-8\r\n")
-  write(sock, "Content-Disposition: inline\r\n\r\n")
-  write(sock, a.object)
-  write(sock, "\r\n")
-end
-
-write_attachment(sock, a::BinaryPart) = begin
-  write(sock, "Content-Type: $(contenttype_from_mime(a.mime))\r\n")
-  write(sock, "Content-Transfer-Encoding: base64\r\n\r\n")
-  writefolded(sock, base64encode(a.object))
-  write(sock, "\r\n")
-end
-
-write_attachment(sock, a::Attachment) = begin
-  write(sock, "Content-Disposition: attachment; filename=\"$(a.name)\"\r\n")
-  write_attachment(sock, a.part)
-end
-
-"email's have a soft line limit of 78"
-writefolded(io, data, sizelimit=78) = begin
-  range = 1:sizelimit:length(data)
-  start = 1
-  for i in 2:length(range)
-    stop = range[i]
-    write(io, @view(data[start:stop]), CRLF)
-    start = stop+1
-  end
-  write(io, @view(data[start:length(data)]), CRLF)
 end
 
 Base.close((;sock)::SMTPServer) = begin
@@ -121,11 +63,22 @@ Base.close((;sock)::SMTPServer) = begin
   close(sock)
 end
 
-send(uri::URI, email::Mail) = begin
-  server = connect(uri)
-  try
-    write(server, email)
-  finally
-    close(server)
-  end
-end
+"""
+Send one or more `Mail`s. Opens a connection, sends, and closes it again:
+
+    send(uri"smtps://user:pass@smtp.gmail.com:465", mail)
+
+Or send over an already open connection:
+
+    connect(uri) do server
+      send(server, mail)
+    end
+
+For one-off mails you can skip constructing the `Mail` yourself and pass
+its fields as keyword arguments:
+
+    send(uri, from="Jake <jake@gmail.com>", to="elon@x.com", subject="hi", body="...")
+"""
+send(uri::URI, mails::Mail...) = connect(server->send(server, mails...), uri)
+send(uri::URI; kw...) = send(uri, Mail(;kw...))
+send(server::SMTPServer, mails::Mail...) = foreach(m->write(server, m), mails)
