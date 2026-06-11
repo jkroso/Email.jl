@@ -1,0 +1,38 @@
+From: Sydney Tools <orders@sydneytools.example>
+To: jake@example.com
+Subject: Order Confirmation 373420
+Message-ID: <ord-373420@sydneytools.example>
+Date: Tue, 09 Jun 2026 17:08:00 +1000
+MIME-Version: 1.0
+Content-Type: multipart/mixed;
+ boundary="----=_NextPart_000_0011_01DCF8C1.0CD64DA0"
+
+This is a multi-part message in MIME format.
+
+------=_NextPart_000_0011_01DCF8C1.0CD64DA0
+Content-Type: multipart/alternative;
+ boundary="----=_NextPart_001_0012_01DCF8C1.0CD64DA0"
+
+
+------=_NextPart_001_0012_01DCF8C1.0CD64DA0
+Content-Type: text/plain;
+	charset="iso-8859-1"
+Content-Transfer-Encoding: 7bit
+
+Dear JAKE ROSOMAN
+
+Thank you for shopping with Sydney Tools.
+------=_NextPart_001_0012_01DCF8C1.0CD64DA0
+Content-Type: text/html
+Content-Transfer-Encoding: 7bit
+
+<html><body>Thank you for shopping with Sydney Tools.</body></html>
+------=_NextPart_001_0012_01DCF8C1.0CD64DA0--
+
+------=_NextPart_000_0011_01DCF8C1.0CD64DA0
+Content-Type: application/pdf; name="tax-invoice-373420.pdf"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="tax-invoice-373420.pdf"
+
+JVBERi0xLjQKJeLjz9MK
+------=_NextPart_000_0011_01DCF8C1.0CD64DA0-- 

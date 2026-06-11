@@ -38,3 +38,16 @@ end
   m = parse_message(IOBuffer(fixture("no_attachment.eml")))
   @test isempty(bins(m))
 end
+
+# RFC 2046 §5.1.1: a multipart body may open with a preamble ("This is a
+# multi-part message in MIME format.") and boundary lines may carry trailing
+# transport padding. Real-world shape: Sydney Tools order confirmations.
+@testset "preamble + padded boundaries" begin
+  m = parse_message(IOBuffer(fixture("preamble.eml")))
+  @test m.subject == "Order Confirmation 373420"
+  bs = bins(m)
+  @test length(bs) == 1
+  @test bs[1][1] == "tax-invoice-373420.pdf"
+  @test bs[1][2] == "application/pdf"
+  @test String(bs[1][3][1:5]) == "%PDF-"
+end

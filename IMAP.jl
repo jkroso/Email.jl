@@ -413,13 +413,17 @@ end
 
 parse_parts(io, marker) = begin
   parts = Any[]
-  @assert all(isspace, readuntil(io, "--"))
-  @assert readline(io) == marker
+  # RFC 2046 §5.1.1: anything before the first boundary delimiter is a preamble
+  # ("This is a multi-part message in MIME format.") and boundary lines may
+  # carry trailing transport padding — skip/strip both rather than asserting.
+  while true
+    eof(io) && error("multipart body has no --$marker boundary")
+    rstrip(readline(io)) == "--$marker" && break
+  end
   while !eof(io)
     part = readuntil(io, "--$marker")
     push!(parts, parse_part(IOBuffer(part)))
-    line = readline(io)
-    line == "--" && return parts
+    startswith(readline(io), "--") && return parts
   end
   error("Unexpected end of file")
 end
