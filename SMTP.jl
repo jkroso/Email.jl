@@ -58,8 +58,7 @@ end
 
 Base.close((;sock)::SMTPServer) = begin
   isopen(sock) || return
-  write(sock, "QUIT\r\n")
-  @assert startswith(readresponse(sock), "221")
+  try write(sock, "QUIT\r\n") catch end # best-effort: don't wait for the 221, mid-DATA the server won't ack and we'd hang
   close(sock)
 end
 
