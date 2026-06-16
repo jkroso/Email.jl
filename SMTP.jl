@@ -52,7 +52,7 @@ Base.write((;sock)::SMTPServer, msg::Mail) = begin
   write(sock, "DATA\r\n")
   @assert startswith(readresponse(sock), "354")
   write(sock, msg)
-  write(sock, '.', CRLF)
+  write(sock, ".$CRLF") # SSLStream has no byte I/O, so the terminator must be one String write not write(sock, '.', CRLF)
   @assert startswith(readresponse(sock), "250")
 end
 
