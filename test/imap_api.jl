@@ -1,4 +1,4 @@
-@use "../IMAP.jl" IMAPError _search_cmd _parse_search _fetch_cmd _parse_literal _imap_quote _uid_set _parse_fetch_literals
+@use "../IMAP.jl" IMAPError _search_cmd _parse_search _fetch_cmd _parse_literal _imap_quote _uid_set _parse_fetch_literals command
 @use Dates: Date
 @use Test...
 
@@ -56,4 +56,59 @@ end
   @test _imap_quote("app pw") == "\"app pw\""              # space survives
   @test _imap_quote("plain") == "\"plain\""
   @test _imap_quote("a\"b\\c") == "\"a\\\"b\\\\c\""        # escape " and \
+end
+
+# Scripted socket: hands the response back in pre-cut chunks, the way TLS
+# records arrive off a real server.  eof() turns true once the script runs dry,
+# so a command loop that misses its status line dies loudly (AssertionError)
+# here instead of blocking forever like it would on a live socket.
+mutable struct ChunkedSock <: IO
+  make::Function                  # tag::String -> Vector{Vector{UInt8}}
+  chunks::Vector{Vector{UInt8}}
+  i::Int
+end
+ChunkedSock(make::Function) = ChunkedSock(make, Vector{UInt8}[], 1)
+Base.unsafe_write(s::ChunkedSock, p::Ptr{UInt8}, n::UInt) = begin
+  s.chunks = s.make(String(first(split(unsafe_string(p, n)))))
+  s.i = 1
+  Int(n)
+end
+Base.eof(s::ChunkedSock) = s.i > length(s.chunks)
+Base.readavailable(s::ChunkedSock) = (c = s.chunks[s.i]; s.i += 1; c)
+
+@testset "command: status line split across chunk boundaries" begin
+  payload = "* 1 FETCH (UID 7 BODY[] {11}\r\nhello world)\r\n"
+  # Cut the full response in two at every byte position.  Gmail can land a TLS
+  # record boundary anywhere — including inside "<tag> OK Success\r\n", which
+  # used to leave the reader blocked forever waiting for bytes that had already
+  # arrived (the field bug: mail scans wedging mid-"Scanning…").
+  reference = nothing
+  for cut in 1:(length(payload) + 20 - 1)   # tag length varies; cover past the OK line
+    sock = ChunkedSock(tag -> begin
+      resp = Vector{UInt8}(payload * "$tag OK Success\r\n")
+      c = clamp(cut, 1, length(resp) - 1)
+      [resp[1:c], resp[c+1:end]]
+    end)
+    out = IOBuffer()
+    command(sock, "UID FETCH 7 (BODY.PEEK[])", out)   # must return, not starve
+    got = String(take!(out))
+    @test occursin("{11}\r\nhello world", got)
+    @test !occursin("OK Success", got)
+    reference === nothing && (reference = got)
+  end
+  # Status line dribbling in across three chunks must also complete.
+  sock3 = ChunkedSock(tag -> begin
+    resp = Vector{UInt8}(payload * "$tag OK Success\r\n")
+    n = length(resp)
+    [resp[1:n-12], resp[n-11:n-6], resp[n-5:end]]
+  end)
+  out3 = IOBuffer()
+  command(sock3, "UID FETCH 7 (BODY.PEEK[])", out3)
+  @test occursin("hello world", String(take!(out3)))
+  # A NO/BAD status must still throw IMAPError even when split mid-line.
+  sockbad = ChunkedSock(tag -> begin
+    resp = Vector{UInt8}("$tag NO [NONEXISTENT] Unknown Mailbox\r\n")
+    [resp[1:3], resp[4:end]]
+  end)
+  @test_throws IMAPError command(sockbad, "SELECT \"nope\"", IOBuffer())
 end

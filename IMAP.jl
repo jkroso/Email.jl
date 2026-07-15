@@ -156,20 +156,36 @@ command(sock, cmd, expectation="OK") = begin
   String(read(out))
 end
 
+# The tagged status line ends the response, but the transport is free to hand
+# it to us split across reads — a TLS record boundary can land anywhere,
+# including mid-tag.  So completion is judged on the last *complete* line seen
+# so far: bytes after the final CRLF of each read are carried into the next
+# one instead of being checked (or written) as if they were a whole line.
+# Checking per-chunk instead used to miss a split status line entirely and
+# block forever on a socket that had already delivered everything.
 command(sock::IO, cmd, out::IO, expectation="OK") = begin
   tag = gentag()
   write(sock, "$tag $cmd\r\n")
+  carry = UInt8[]   # partial trailing line from the previous read
   while true
     buffer = readchunk(sock)
-    if hasstatusline(buffer, tag)
-      range = status_split(buffer)
-      status = String(@view(buffer[range.stop + length(tag) + 2:end]))
-      startswith(status, expectation) || throw(IMAPError(strip(status)))
-      write(out, resize!(buffer, range.start))
-      break
-    else
-      write(out, buffer)
+    combined = isempty(carry) ? buffer : vcat(carry, buffer)
+    last_crlf = findlast(bCRLF, combined)
+    if last_crlf === nothing
+      carry = combined
+      continue
     end
+    prev_crlf = findlast(bCRLF, @view(combined[1:last_crlf.start-1]))
+    line_start = prev_crlf === nothing ? 1 : prev_crlf.stop + 1
+    line = String(combined[line_start:last_crlf.start-1])
+    if startswith(line, tag)
+      status = length(line) >= length(tag) + 2 ? line[length(tag)+2:end] : ""
+      startswith(status, expectation) || throw(IMAPError(strip(status)))
+      write(out, @view(combined[1:line_start-1]))
+      break
+    end
+    write(out, @view(combined[1:last_crlf.stop]))
+    carry = combined[last_crlf.stop+1:end]
   end
 end
 
