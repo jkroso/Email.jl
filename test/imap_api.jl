@@ -1,4 +1,4 @@
-@use "../IMAP.jl" IMAPError _search_cmd _parse_search _fetch_cmd _parse_literal _imap_quote _uid_set _parse_fetch_literals command
+@use "../IMAP.jl" IMAPError _search_cmd _parse_search _fetch_cmd _parse_literal _imap_quote _uid_set _parse_fetch_literals command READ_TIMEOUT
 @use Dates: Date
 @use Test...
 
@@ -111,4 +111,51 @@ Base.readavailable(s::ChunkedSock) = (c = s.chunks[s.i]; s.i += 1; c)
     [resp[1:3], resp[4:end]]
   end)
   @test_throws IMAPError command(sockbad, "SELECT \"nope\"", IOBuffer())
+end
+
+# Socket that goes permanently quiet once its scripted chunks run out — eof
+# blocks the way a live TLS socket does when the peer just stops talking.
+mutable struct QuietSock <: IO
+  chunks::Vector{Vector{UInt8}}
+  i::Int
+  gate::Channel{Nothing}   # never filled: a dry read parks here
+end
+QuietSock(chunks) = QuietSock(chunks, 1, Channel{Nothing}(1))
+Base.unsafe_write(s::QuietSock, p::Ptr{UInt8}, n::UInt) = Int(n)
+Base.eof(s::QuietSock) = s.i <= length(s.chunks) ? false : (take!(s.gate); true)
+Base.readavailable(s::QuietSock) = (c = s.chunks[s.i]; s.i += 1; c)
+
+@testset "read timeout: a dry socket throws instead of blocking" begin
+  old = READ_TIMEOUT[]
+  try
+    READ_TIMEOUT[] = 0.2
+    # Mid-response silence: one partial chunk arrives, then nothing, ever.
+    sock = QuietSock([Vector{UInt8}("* 1 FETCH (UID 7 BODY[] {5}\r\nhel")])
+    secs = @elapsed @test_throws IMAPError command(sock, "UID FETCH 7 (BODY.PEEK[])", IOBuffer())
+    @test secs < 5   # an order of magnitude of headroom over the 0.2s timeout
+    close(sock.gate) # release the parked reader task
+    # Silence before the first byte (server accepts but never answers).
+    sock2 = QuietSock(Vector{UInt8}[])
+    @test_throws IMAPError command(sock2, "NOOP", IOBuffer())
+    close(sock2.gate)
+  finally
+    READ_TIMEOUT[] = old
+  end
+end
+
+# eof=true immediately: the server closed the connection.
+struct ClosedSock <: IO end
+Base.unsafe_write(::ClosedSock, ::Ptr{UInt8}, n::UInt) = Int(n)
+Base.eof(::ClosedSock) = true
+Base.readavailable(::ClosedSock) = UInt8[]
+
+@testset "server-closed socket throws IMAPError, not AssertionError" begin
+  @test_throws IMAPError command(ClosedSock(), "NOOP", IOBuffer())
+  old = READ_TIMEOUT[]
+  try
+    READ_TIMEOUT[] = 0.0   # timeout disabled must preserve the same error type
+    @test_throws IMAPError command(ClosedSock(), "NOOP", IOBuffer())
+  finally
+    READ_TIMEOUT[] = old
+  end
 end
