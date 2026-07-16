@@ -1,8 +1,14 @@
 @use "github.com/jkroso/URI.jl" URI decode
 @use "./types.jl" Mail Attachment PlainText HTMLPart BinaryPart Alternatives Part Contact text html CRLF
+@use "./read.jl" READ_TIMEOUT readchunk
 @use Sockets: connect, TCPSocket
 @use Base64: base64encode
 @use OpenSSL
+
+struct SMTPError <: Exception
+  msg::String
+end
+Base.showerror(io::IO, e::SMTPError) = print(io, "SMTPError: ", e.msg)
 
 mutable struct SMTPServer
   uri::URI
@@ -33,7 +39,11 @@ hello(s::SMTPServer) = begin
   s
 end
 
-readresponse(ctx) = eof(ctx) ? "" : String(readavailable(ctx))
+# Timed read (read.jl): a silent socket throws SMTPError after READ_TIMEOUT
+# instead of blocking in eof() until the server closes the connection.  SMTP
+# replies are single short lines, so any silence beyond the timeout means the
+# peer or network is gone.
+readresponse(sock) = String(readchunk(sock, SMTPError))
 
 haslogin(uri::URI) = !isempty(uri.username) && !isempty(uri.password)
 
